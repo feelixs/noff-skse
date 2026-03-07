@@ -1,5 +1,7 @@
 #include "pch.h"
 
+#include <unordered_set>
+
 namespace logger = SKSE::log;
 
 // ---------------------------------------------------------------------------
@@ -13,10 +15,18 @@ namespace logger = SKSE::log;
 //   ALLOW hit when: (!P || H || !S) && (!P || H || !A)
 //   BLOCK hit when: P && !H && (S || A)
 //
-// We hook MagicTarget::AddTarget and return false to drop the hit cleanly.
+// Hook 1: MagicTarget::AddTarget — returns false to drop hits on friendlies.
+// Hook 2: Actor::SendAssaultAlarm — suppresses NPC hostility reaction when
+//         a player spell hits a neutral (non-hostile) NPC.  Melee and
+//         NPC-cast spells are unaffected.
 // ---------------------------------------------------------------------------
 
 namespace {
+
+    // Actors recently hit by a player spell that has the Hostile flag.
+    // Populated in AddTargetHook, consumed in SendAssaultAlarmHook.
+    // Safe without synchronisation — game logic is single-threaded.
+    static inline std::unordered_set<RE::FormID> g_playerSpellTargets;
 
     // Checks if any of the target's factions have an Ally reaction
     // toward any faction the player belongs to.
@@ -47,6 +57,22 @@ namespace {
         }
         return false;
     }
+
+    // Returns true if any effect on the magic item has the Hostile flag.
+    bool HasHostileEffect(RE::MagicItem* a_item)
+    {
+        if (!a_item) {
+            return false;
+        }
+        for (auto* eff : a_item->effects) {
+            if (eff && eff->baseEffect && eff->baseEffect->IsHostile()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // ── Hook 1: MagicTarget::AddTarget ──────────────────────────────────────
 
     // Actor inherits: TESObjectREFR(4 vtables), MagicTarget, ActorValueOwner,
     // ActorState, 2x BSTEventSink, IPostAnimationChannelUpdateFunctor = 10 total.
@@ -96,12 +122,18 @@ namespace {
                 targetActor->GetName(), H, S, A,
                 a_data.magicItem ? a_data.magicItem->GetName() : "?");
 
-            // Allow when: (H || !S) && (H || !A)  [simplified with P=true]
-            //   = H || (!S && !A)
             // Block when: !H && (S || A)
             if (!H && (S || A)) {
                 logger::trace("NOFF: blocked");
                 return false;  // drop the hit — effect never applied
+            }
+
+            // Hit is allowed.  If non-hostile and spell has Hostile effects,
+            // mark the target so SendAssaultAlarm can suppress the reaction.
+            if (!H && HasHostileEffect(a_data.magicItem)) {
+                g_playerSpellTargets.insert(targetActor->GetFormID());
+                logger::trace("NOFF: marked '{}' for assault-alarm suppression",
+                    targetActor->GetName());
             }
 
             return func(a_this, a_data);
@@ -125,6 +157,40 @@ namespace {
 
             logger::info("NOFF: MagicTarget::AddTarget hooked on Actor, Character, PlayerCharacter (idx {} vfunc {})",
                 kMagicTargetIdx, kAddTargetVfuncIdx);
+        }
+    };
+
+    // ── Hook 2: Actor::SendAssaultAlarm ─────────────────────────────────────
+    //
+    // Non-virtual function.  Ghidra signature (AE 1.6.1170):
+    //   void Actor::SendAssaultAlarm(TESObjectREFR* a_param, bool a_flag)
+    //   RCX = this (victim), RDX = a_param, R8B = a_flag
+    //
+    // Hooked via 5-byte branch trampoline.
+    // SE ID 36429  /  AE ID 37424
+
+    struct SendAssaultAlarmHook {
+        static void thunk(RE::Actor* a_this, RE::TESObjectREFR* a_param, bool a_flag)
+        {
+            auto it = g_playerSpellTargets.find(a_this->GetFormID());
+            if (it != g_playerSpellTargets.end()) {
+                g_playerSpellTargets.erase(it);
+                logger::trace("NOFF: suppressed assault alarm on '{}'",
+                    a_this->GetName());
+                return;
+            }
+
+            return func(a_this, a_param, a_flag);
+        }
+
+        static inline REL::Relocation<decltype(thunk)> func;
+
+        static void Install()
+        {
+            REL::Relocation<std::uintptr_t> target{ RELOCATION_ID(36429, 37424) };
+            func = target.write_branch<5>(thunk);
+
+            logger::info("NOFF: Actor::SendAssaultAlarm hooked (RELOCATION_ID 36429/37424)");
         }
     };
 
@@ -160,9 +226,12 @@ SKSEPluginLoad(const SKSE::LoadInterface* a_skse)
     auto* plugin = SKSE::PluginDeclaration::GetSingleton();
     logger::info("NOFF v{} loading", plugin->GetVersion());
 
+    SKSE::AllocTrampoline(14);
+
     SKSE::GetMessagingInterface()->RegisterListener([](SKSE::MessagingInterface::Message* msg) {
         if (msg->type == SKSE::MessagingInterface::kDataLoaded) {
             AddTargetHook::Install();
+            SendAssaultAlarmHook::Install();
         }
     });
 
