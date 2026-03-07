@@ -68,8 +68,18 @@ namespace {
                 return func(a_this, a_data);
             }
 
+            // Always allow spells on self
+            if (targetActor == static_cast<RE::Actor*>(player)) {
+                return func(a_this, a_data);
+            }
+
             // P: cast by player — caster is a TESObjectREFR*
             if (a_data.caster != static_cast<RE::TESObjectREFR*>(player)) {
+                return func(a_this, a_data);
+            }
+
+            // Weapon enchantments go through here too — skip them
+            if (skyrim_cast<RE::EnchantmentItem*>(a_data.magicItem)) {
                 return func(a_this, a_data);
             }
 
@@ -101,9 +111,19 @@ namespace {
 
         static void Install()
         {
-            REL::Relocation<std::uintptr_t> vtbl{ RE::VTABLE_Actor[kMagicTargetIdx] };
-            func = vtbl.write_vfunc(kAddTargetVfuncIdx, thunk);
-            logger::info("NOFF: MagicTarget::AddTarget hooked (VTABLE_Actor[{}] vfunc {})",
+            // Hook all three classes that have their own MagicTarget vtable.
+            // Character and PlayerCharacter don't inherit Actor's MagicTarget
+            // vtable — each gets its own, all at the same index and slot.
+            REL::Relocation<std::uintptr_t> vtblActor{ RE::VTABLE_Actor[kMagicTargetIdx] };
+            func = vtblActor.write_vfunc(kAddTargetVfuncIdx, thunk);
+
+            REL::Relocation<std::uintptr_t> vtblCharacter{ RE::VTABLE_Character[kMagicTargetIdx] };
+            vtblCharacter.write_vfunc(kAddTargetVfuncIdx, thunk);
+
+            REL::Relocation<std::uintptr_t> vtblPlayerCharacter{ RE::VTABLE_PlayerCharacter[kMagicTargetIdx] };
+            vtblPlayerCharacter.write_vfunc(kAddTargetVfuncIdx, thunk);
+
+            logger::info("NOFF: MagicTarget::AddTarget hooked on Actor, Character, PlayerCharacter (idx {} vfunc {})",
                 kMagicTargetIdx, kAddTargetVfuncIdx);
         }
     };
