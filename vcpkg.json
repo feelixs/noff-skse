@@ -1,0 +1,11 @@
+{
+    "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg/master/scripts/vcpkg.schema.json",
+    "name": "noff",
+    "version-string": "1.0.0",
+    "dependencies": [
+        {
+            "name": "commonlibsse-ng",
+            "features": ["address-library-all"]
+        }
+    ]
+}
