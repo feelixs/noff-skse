@@ -82,12 +82,15 @@ namespace {
             // A: target has Ally faction relation to player
             const bool A = IsAllyToPlayer(targetActor, player);
 
+            logger::trace("NOFF: player spell on '{}' H={} S={} A={} spell={}",
+                targetActor->GetName(), H, S, A,
+                a_data.magicItem ? a_data.magicItem->GetName() : "?");
+
             // Allow when: (H || !S) && (H || !A)  [simplified with P=true]
             //   = H || (!S && !A)
             // Block when: !H && (S || A)
             if (!H && (S || A)) {
-                logger::trace("NOFF: blocked player spell on {} (S={} A={})",
-                    targetActor->GetName(), S, A);
+                logger::trace("NOFF: blocked");
                 return false;  // drop the hit — effect never applied
             }
 
@@ -123,13 +126,8 @@ void InitLogger()
     auto sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>(path->string(), true);
     auto log  = std::make_shared<spdlog::logger>("global", std::move(sink));
 
-#ifndef NDEBUG
     log->set_level(spdlog::level::trace);
     log->flush_on(spdlog::level::trace);
-#else
-    log->set_level(spdlog::level::info);
-    log->flush_on(spdlog::level::info);
-#endif
 
     spdlog::set_default_logger(std::move(log));
 }

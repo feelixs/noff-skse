@@ -37,4 +37,4 @@ if errorlevel 1 (
 
 echo.
 echo Build succeeded!
-pause
+call "%~dp0zipup.bat"
