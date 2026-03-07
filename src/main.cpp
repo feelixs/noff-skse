@@ -18,17 +18,8 @@ namespace logger = SKSE::log;
 
 namespace {
 
-    // ------------------------------------------------------------------
-    // Faction ally check
-    //
-    // Iterates the target NPC's faction memberships and checks whether
-    // any of those factions has a GROUP_COMBAT_REACTION == 2 (Ally)
-    // reaction toward any faction the player belongs to.
-    //
-    // Field names (factions, reactions) are from CommonLibSSE-NG
-    // RE/FormComponents/TESActorBase.h and RE/GameObjects/TESFaction.h.
-    // If compilation fails here, inspect those headers and adjust.
-    // ------------------------------------------------------------------
+    // Checks if any of the target's factions have an Ally reaction
+    // toward any faction the player belongs to.
     bool IsAllyToPlayer(RE::Actor* a_target, RE::PlayerCharacter* a_player)
     {
         auto* targetBase = a_target->GetActorBase();
@@ -43,18 +34,12 @@ namespace {
                 continue;
             }
 
-            // TESFaction::reactions — verify field name in RE/GameObjects/TESFaction.h
-            // reaction.reaction: GROUP_COMBAT_REACTION  0=Neutral 1=Enemy 2=Ally 3=Friend
-            for (auto& reaction : tFaction->reactions) {
-                if (reaction.reaction != 2) {
-                    continue;
-                }
-                auto* reactionTarget = reaction.faction;
-                if (!reactionTarget) {
+            for (auto* reaction : tFaction->reactions) {
+                if (!reaction || reaction->fightReaction != RE::FIGHT_REACTION::kAlly) {
                     continue;
                 }
                 for (auto& playerFR : playerBase->factions) {
-                    if (playerFR.faction == reactionTarget) {
+                    if (playerFR.faction == reaction->form) {
                         return true;
                     }
                 }
@@ -63,27 +48,12 @@ namespace {
         return false;
     }
 
-    // ------------------------------------------------------------------
-    // Hook: MagicTarget::AddTarget
-    //
-    // Installed as a vtable write on Actor's MagicTarget sub-vtable.
-    //
-    // *** VERIFY THESE TWO CONSTANTS BEFORE BUILDING ***
-    //
-    //   kMagicTargetIdx    — index into VTABLE_Actor[] that holds the
-    //                        MagicTarget sub-vtable pointer
-    //   kAddTargetVfuncIdx — slot within that sub-vtable for AddTarget
-    //
-    // How to verify with IDA (address library applied):
-    //   1. Find the Actor class vtable list.
-    //   2. Locate the sub-vtable labelled Actor::MagicTarget (or search
-    //      for the string "MagicTarget" in xrefs).
-    //   3. Count its 0-based position in RE::VTABLE_Actor[].
-    //   4. Within that sub-vtable, AddTarget is the slot that fans out
-    //      into ActiveEffect::Start — typically slot 9.
-    // ------------------------------------------------------------------
-    constexpr std::size_t kMagicTargetIdx    = 6;  // TODO verify
-    constexpr std::size_t kAddTargetVfuncIdx = 9;  // TODO verify
+    // Actor inherits: TESObjectREFR(4 vtables), MagicTarget, ActorValueOwner,
+    // ActorState, 2x BSTEventSink, IPostAnimationChannelUpdateFunctor = 10 total.
+    // MagicTarget is the 5th vtable segment (index 4).
+    // AddTarget is slot 1 in MagicTarget's vtable (confirmed via Ghidra).
+    constexpr std::size_t kMagicTargetIdx    = 4;
+    constexpr std::size_t kAddTargetVfuncIdx = 1;
 
     struct AddTargetHook {
         static bool thunk(RE::MagicTarget* a_this, RE::MagicTarget::AddTargetData& a_data)
@@ -93,23 +63,13 @@ namespace {
                 return func(a_this, a_data);
             }
 
-            auto* caster = a_data.caster;
-            if (!caster) {
-                return func(a_this, a_data);
-            }
-
-            auto* casterActor = caster->GetCasterActor();
-            if (!casterActor) {
-                return func(a_this, a_data);
-            }
-
             auto* player = RE::PlayerCharacter::GetSingleton();
             if (!player) {
                 return func(a_this, a_data);
             }
 
-            // P: cast by player — only proceed for player spells
-            if (casterActor != static_cast<RE::Actor*>(player)) {
+            // P: cast by player — caster is a TESObjectREFR*
+            if (a_data.caster != static_cast<RE::TESObjectREFR*>(player)) {
                 return func(a_this, a_data);
             }
 

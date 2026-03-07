@@ -3,9 +3,7 @@
     "name": "noff",
     "version-string": "1.0.0",
     "dependencies": [
-        {
-            "name": "commonlibsse-ng",
-            "features": ["address-library-all"]
-        }
+        "spdlog",
+        "rapidcsv"
     ]
 }

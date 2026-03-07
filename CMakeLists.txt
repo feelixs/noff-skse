@@ -14,7 +14,20 @@ if(PROJECT_SOURCE_DIR STREQUAL PROJECT_BINARY_DIR)
     message(FATAL_ERROR "In-source builds not allowed.")
 endif()
 
-find_package(CommonLibSSE CONFIG REQUIRED)
+set(CommonLibSSE_DIR "" CACHE PATH "Path to CommonLibSSE-NG source tree")
+if(NOT CommonLibSSE_DIR)
+    # Default to sibling directory
+    set(CommonLibSSE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../CommonLibSSE-NG")
+endif()
+
+if(NOT EXISTS "${CommonLibSSE_DIR}/CMakeLists.txt")
+    message(FATAL_ERROR "CommonLibSSE-NG not found at ${CommonLibSSE_DIR}. "
+        "Set -DCommonLibSSE_DIR=<path> or clone it next to this project.")
+endif()
+
+set(BUILD_TESTS OFF CACHE BOOL "" FORCE)
+add_subdirectory("${CommonLibSSE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/CommonLibSSE" EXCLUDE_FROM_ALL)
+include("${CommonLibSSE_DIR}/cmake/CommonLibSSE.cmake")
 
 add_commonlibsse_plugin(${PROJECT_NAME}
     SOURCES
