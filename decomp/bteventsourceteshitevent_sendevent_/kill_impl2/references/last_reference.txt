@@ -1,0 +1,6 @@
+          1436576d0 80 4f 66 00 10  _IMAGE_R                          [34620]
+                    50 66 00 dc 03
+                    d5 01
+             1436576d0 80 4f 66 00     ibo32     Actor::Kill_impl2       BeginAddress
+             1436576d4 10 50 66 00     ibo32     DAT_140665010           EndAddress    = CCh
+             1436576d8 dc 03 d5 01     ibo32     UNWIND_INFO_141d503dc   UnwindInfoAd

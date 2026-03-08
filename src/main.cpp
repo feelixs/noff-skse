@@ -20,6 +20,79 @@ namespace {
 
     static inline bool g_suppressNextHitEvent = false;
 
+    // Resolves the display name for any TESForm that may be a spell, shout
+    // word-combo spell, or magic effect — returning the highest-level name:
+    //   MGEF      → parent SpellItem  → parent TESShout (if voice-power)
+    //   SpellItem (kVoicePower) → parent TESShout
+    //   Any other MagicItem    → item's own name
+    // Returns "" when the form is null or has no resolvable magic name.
+    const char* GetSpellDisplayName(RE::TESForm* a_form)
+    {
+        if (!a_form) {
+            return "";
+        }
+
+        // EffectSetting (MGEF) — find a parent SpellItem that contains it.
+        if (auto* mgef = skyrim_cast<RE::EffectSetting*>(a_form)) {
+            auto* dh = RE::TESDataHandler::GetSingleton();
+            if (dh) {
+                for (auto* spell : dh->GetFormArray<RE::SpellItem>()) {
+                    if (!spell) continue;
+                    for (auto* eff : spell->effects) {
+                        if (eff && eff->baseEffect == mgef) {
+                            return GetSpellDisplayName(spell);  // recurse → may hit voice-power branch
+                        }
+                    }
+                }
+            }
+            return "";
+        }
+
+        // Voice-power SpellItem (shout word-combo) — return parent TESShout name.
+        if (auto* spell = skyrim_cast<RE::SpellItem*>(a_form)) {
+            if (spell->data.spellType == RE::MagicSystem::SpellType::kVoicePower) {
+                auto* dh = RE::TESDataHandler::GetSingleton();
+                if (dh) {
+                    for (auto* shout : dh->GetFormArray<RE::TESShout>()) {
+                        if (!shout) continue;
+                        for (auto& variation : shout->variations) {
+                            if (variation.spell == spell) {
+                                return shout->GetName();
+                            }
+                        }
+                    }
+                }
+                return spell->GetName();  // fallback if shout table lookup fails
+            }
+        }
+
+        // Any other MagicItem (regular spell, direct TESShout lookup, etc.)
+        if (auto* item = skyrim_cast<RE::MagicItem*>(a_form)) {
+            return item->GetName();
+        }
+
+        return "";
+    }
+
+    // Displays "ActorName resisted SpellName." in the top-left HUD.
+    // Uses a session-scoped set to coalesce duplicate notifications from
+    // multiple hooks firing for the same hit into a single print.
+    // cancelIfAlreadyQueued=true prevents re-showing while the message is visible.
+    void NotifyResisted(const char* a_actorName, RE::TESForm* a_sourceForm)
+    {
+        const char* spellName = GetSpellDisplayName(a_sourceForm);
+        if (!a_actorName || !a_actorName[0] || !spellName || !spellName[0]) {
+            return;
+        }
+        static std::unordered_set<std::string> s_shown;
+        std::string key = std::string(a_actorName) + "|" + spellName;
+        if (!s_shown.insert(key).second) {
+            return;  // already notified this session for this actor+spell pair
+        }
+        auto msg = std::string(a_actorName) + " resisted " + spellName + ".";
+        RE::DebugNotification(msg.c_str(), nullptr, true);
+    }
+
     // Returns true if any effect on the magic item has the Hostile flag.
     bool HasHostileEffect(RE::MagicItem* a_item)
     {
@@ -34,8 +107,28 @@ namespace {
         return false;
     }
 
-    // Checks if any of the target's factions have an Ally reaction
-    // toward any faction the player belongs to.
+    // Cached version of HasHostileEffect. Spell/shout hostility flags are
+    // static at runtime, so the result is safe to cache for the session.
+    // Called on every VME::Update tick (~60/s per active effect), so the
+    // cache avoids repeated effect-list walks on the same spell form.
+    bool IsParentSpellHostile(RE::MagicItem* a_item)
+    {
+        if (!a_item) {
+            return false;
+        }
+        static std::unordered_map<RE::FormID, bool> s_cache;
+        auto formID = a_item->GetFormID();
+        auto [it, inserted] = s_cache.emplace(formID, false);
+        if (inserted) {
+            it->second = HasHostileEffect(a_item);
+        }
+        return it->second;
+    }
+
+    // Equivalent to the original mod's condition:
+    //   GetFactionRelation(PlayerRef) == 2 (Ally), run on subject.
+    // Walks the target's faction list and checks each faction's GROUP_REACTION
+    // list for an kAlly reaction toward any faction the player belongs to.
     bool IsAllyToPlayer(RE::Actor* a_target, RE::PlayerCharacter* a_player)
     {
         auto* targetBase = a_target->GetActorBase();
@@ -43,21 +136,13 @@ namespace {
         if (!targetBase || !playerBase) {
             return false;
         }
-
         for (auto& targetFR : targetBase->factions) {
             auto* tFaction = targetFR.faction;
-            if (!tFaction) {
-                continue;
-            }
-
+            if (!tFaction) continue;
             for (auto* reaction : tFaction->reactions) {
-                if (!reaction || reaction->fightReaction != RE::FIGHT_REACTION::kAlly) {
-                    continue;
-                }
+                if (!reaction || reaction->fightReaction != RE::FIGHT_REACTION::kAlly) continue;
                 for (auto& playerFR : playerBase->factions) {
-                    if (playerFR.faction == reaction->form) {
-                        return true;
-                    }
+                    if (reaction->form == playerFR.faction) return true;
                 }
             }
         }
@@ -122,14 +207,15 @@ namespace {
                 a_data.magicItem ? a_data.magicItem->GetName() : "?");
 
             // Block when: !H && (S || A) && hostile spell
-            if (!H && (S || A) && HasHostileEffect(a_data.magicItem)) {
+            if (!H && (S || A) && IsParentSpellHostile(a_data.magicItem)) {
                 logger::trace("NOFF: blocked on ally/summon");
+                NotifyResisted(targetActor->GetName(), a_data.magicItem);
                 return false;  // drop the hit — effect never applied
             }
 
-            // Neutral NPC hit by hostile spell: let effect apply but suppress
-            // the hit-task that would make the NPC turn hostile.
-            if (!H && HasHostileEffect(a_data.magicItem)) {
+            // Neutral NPC hit by hostile spell: formula passes — let effect apply,
+            // suppress hostility silently (no "resisted" notification).
+            if (!H && IsParentSpellHostile(a_data.magicItem)) {
                 logger::trace("NOFF: suppressing hit-task for '{}'", targetActor->GetName());
                 g_suppressNextHitEvent = true;
                 bool result = func(a_this, a_data);
@@ -144,6 +230,11 @@ namespace {
 
         static void Install()
         {
+            auto base = REL::Module::get().base();
+            REL::Relocation<std::uintptr_t> vtblActorPrimary{ RE::VTABLE_Actor[0] };
+            auto slot260 = *reinterpret_cast<std::uintptr_t*>(vtblActorPrimary.address() + 260 * sizeof(void*));
+            logger::info("NOFF: Actor vtable slot 260 = {:016X} (offset {:08X})", slot260, slot260 - base);
+
             // Hook all three classes that have their own MagicTarget vtable.
             // Character and PlayerCharacter don't inherit Actor's MagicTarget
             // vtable — each gets its own, all at the same index and slot.
@@ -156,7 +247,6 @@ namespace {
             REL::Relocation<std::uintptr_t> vtblPlayerCharacter{ RE::VTABLE_PlayerCharacter[kMagicTargetIdx] };
             vtblPlayerCharacter.write_vfunc(kAddTargetVfuncIdx, thunk);
 
-            auto base = REL::Module::get().base();
             logger::debug("NOFF: image base            = {:016X}", base);
             logger::debug("NOFF: Actor::AddTarget      = {:016X} (offset {:08X})",
                 func.address(), func.address() - base);
@@ -211,12 +301,13 @@ namespace {
                 targetActor->GetName(), H, S, A,
                 a_this->spell ? a_this->spell->GetName() : "?");
 
-            if (!H && (S || A) && HasHostileEffect(a_this->spell)) {
+            if (!H && (S || A) && IsParentSpellHostile(a_this->spell)) {
                 logger::trace("NOFF: VME::Update blocked on ally/summon");
+                NotifyResisted(targetActor->GetName(), a_this->spell);
                 return;
             }
 
-            if (!H && HasHostileEffect(a_this->spell)) {
+            if (!H && IsParentSpellHostile(a_this->spell)) {
                 logger::trace("NOFF: VME::Update suppressing for '{}'", targetActor->GetName());
                 g_suppressNextHitEvent = true;
                 func(a_this, a_delta);
@@ -237,13 +328,103 @@ namespace {
         }
     };
 
-    // ── Hook 3: Hit-event broadcast ──────────────────────────────────────────
+    // ── Hook 3: Actor vtable[0x820/8] — post-health-damage hostility notify ──
+    //
+    // Character::sub (AE 38468, 0x6B27A0) applies health damage then calls
+    // vtable[0]+0x820 (AE 38606, slot 260) with the caster. That function
+    // (func_0x0001406bc4a0, AE 38631) contains two separate branches:
+    //   line 56: Actor::Combat_unk1(actor, 8)  — hostility trigger (param_3 > 0)
+    //   line 96: Actor::Kill_impl2(...)         — kill (param_3 <= 0)
+    //
+    // We hook slot 260 as a flag-setter: when player→non-hostile, set
+    // g_suppressNextHitEvent, call through, then clear the flag.
+    // CombatUnk1Hook (below) reads the flag at line 56 and skips that call,
+    // leaving Kill_impl2 at line 96 completely unaffected.
+
+    struct HealthDamageNotifyHook {
+        static void thunk(RE::Actor* a_target, RE::TESObjectREFR* a_caster, float a_damage)
+        {
+            auto* player = RE::PlayerCharacter::GetSingleton();
+            if (player && a_caster == static_cast<RE::TESObjectREFR*>(player) &&
+                !a_target->IsHostileToActor(player)) {
+                logger::trace("NOFF: health-damage notify: setting flag for '{}'",
+                    a_target->GetName());
+                g_suppressNextHitEvent = true;
+                func(a_target, a_caster, a_damage);
+                g_suppressNextHitEvent = false;
+                return;
+            }
+            return func(a_target, a_caster, a_damage);
+        }
+
+        static inline REL::Relocation<decltype(thunk)> func;
+
+        static void Install()
+        {
+            constexpr std::size_t kSlot = 0x820 / sizeof(void*);  // 260
+
+            REL::Relocation<std::uintptr_t> vtblActor{ RE::VTABLE_Actor[0] };
+            func = vtblActor.write_vfunc(kSlot, thunk);
+
+            REL::Relocation<std::uintptr_t> vtblCharacter{ RE::VTABLE_Character[0] };
+            vtblCharacter.write_vfunc(kSlot, thunk);
+
+            REL::Relocation<std::uintptr_t> vtblPlayerCharacter{ RE::VTABLE_PlayerCharacter[0] };
+            vtblPlayerCharacter.write_vfunc(kSlot, thunk);
+
+            logger::info("NOFF: health-damage notify hook installed (vtable[0] slot {})", kSlot);
+        }
+    };
+
+    // ── Hook 3b: Actor::Combat_unk1 call site (func_0x0001406bc4a0, line 56) ──
+    //
+    // Actor::Combat_unk1(actor, 8) at offset 0x6BC620 is the call that sets the
+    // NPC's combat state and makes IsHostileToActor return true. It lives on the
+    // param_3 > 0 branch of func_0x0001406bc4a0 (i.e. only when the actor is still
+    // alive after taking damage). Kill_impl2 is on the param_3 <= 0 branch at
+    // line 96 — a completely separate path not touched by this hook.
+    //
+    // When HealthDamageNotifyHook sets g_suppressNextHitEvent, we skip this call,
+    // leaving the kill path intact.
+
+    struct CombatUnk1Hook {
+        static void thunk(RE::Actor* a_actor, std::uint32_t a_param2)
+        {
+            if (g_suppressNextHitEvent) {
+                logger::trace("NOFF: Combat_unk1 suppressed for '{}'",
+                    a_actor ? a_actor->GetName() : "?");
+                return;
+            }
+            logger::trace("NOFF: Combat_unk1 passthrough for '{}' param2={}",
+                a_actor ? a_actor->GetName() : "?", a_param2);
+            return func(a_actor, a_param2);
+        }
+
+        static inline REL::Relocation<decltype(thunk)> func;
+
+        static void Install()
+        {
+            if (!REL::Module::IsAE()) {
+                logger::warn("NOFF: CombatUnk1Hook requires AE — skipped");
+                return;
+            }
+
+            // CALL to Actor::Combat_unk1 at line 56 inside func_0x0001406bc4a0.
+            // Verified in Ghidra for AE 1.6.1170 at 0x1406BC620.
+            REL::Relocation<std::uintptr_t> target{ REL::Offset(0x6BC620) };
+            func = SKSE::GetTrampoline().write_call<5>(target.address(),
+                reinterpret_cast<std::uintptr_t>(thunk));
+
+            logger::info("NOFF: Combat_unk1 hook installed at offset {:08X}", 0x6BC620u);
+        }
+    };
+
+    // ── Hook 5: Hit-event broadcast (AddTarget path) ─────────────────────────
     //
     // BSTEventSource<TESHitEvent>::SendEvent call site inside Actor::AddTarget
-    // (offset 0x6C533B, AE 1.6.1170). Broadcasts to all registered hit-event
-    // listeners including the crime/witness system. Suppressing this prevents
-    // guards from being alerted by AOE spells (Fire Storm, Lightning Storm).
-    // Skipped when g_suppressNextHitEvent is set by AddTargetHook.
+    // (offset 0x6C533B, AE 1.6.1170). Covers direct-hit projectile spells
+    // (Ice Spike, Firebolt) and concentration beams (Flames, Lightning Storm
+    // initial tick). Skipped when g_suppressNextHitEvent is set by AddTargetHook.
 
     struct HitEventHook {
         static void thunk(void* a_eventSource, void* a_event)
@@ -252,6 +433,7 @@ namespace {
                 logger::trace("NOFF: hit-event suppressed");
                 return;
             }
+            logger::trace("NOFF: hit-event passthrough");
             return func(a_eventSource, a_event);
         }
 
@@ -273,7 +455,216 @@ namespace {
         }
     };
 
-    // ── Hook 3: Hit-task dispatch ────────────────────────────────────────────
+    // ── Hook 5b: TESObjectREFR::sub (Explosion_ApplyEffects, post-SendEvent) ──
+    //
+    // Called at offset 0x7D16E2 inside Explosion_ApplyEffects for CHARACTER targets
+    // (non-player), AFTER the TESHitEvent SendEvent. It applies the explosion impact
+    // to the actor (hit reaction, combat start, etc.). For player→non-hostile targets
+    // this is what internally triggers Actor::StartCombat, making IsHostileToActor
+    // return true ~13ms later despite all TESHitEvent hooks firing correctly.
+
+    struct ExplosionActorHitHook {
+        static void thunk(RE::Actor* a_target, void* a_hitData)
+        {
+            // g_suppressNextHitEvent is set by ExplosionHitEventHook when the
+            // cause is the player and target is non-hostile — both hooks fire
+            // within the same Explosion_ApplyEffects loop iteration.
+            if (g_suppressNextHitEvent) {
+                g_suppressNextHitEvent = false;
+                logger::trace("NOFF: explosion actor-hit suppressed for '{}'",
+                    a_target ? a_target->GetName() : "?");
+                return;
+            }
+            logger::trace("NOFF: explosion actor-hit passthrough for '{}'",
+                a_target ? a_target->GetName() : "?");
+            return func(a_target, a_hitData);
+        }
+
+        static inline REL::Relocation<decltype(thunk)> func;
+
+        static void Install()
+        {
+            if (!REL::Module::IsAE()) {
+                logger::warn("NOFF: ExplosionActorHitHook requires AE — skipped");
+                return;
+            }
+
+            REL::Relocation<std::uintptr_t> target{ REL::Offset(0x7D16E2) };
+            func = SKSE::GetTrampoline().write_call<5>(target.address(),
+                reinterpret_cast<std::uintptr_t>(thunk));
+
+            logger::info("NOFF: explosion actor-hit hook installed at offset {:08X}", 0x7D16E2u);
+        }
+    };
+
+    // ── Hook 6: Hit-event broadcast (Explosion_ApplyEffects path) ────────────
+    //
+    // BSTEventSource<TESHitEvent>::SendEvent call site inside Explosion_ApplyEffects
+    // (offset 0x7D15BD, AE 1.6.1170). This is the path taken by Fireball's explosion
+    // and Lightning Storm's bolt-node — both bypass AddTarget entirely.
+    // Unlike the AddTarget path, this function has no hostility check before
+    // dispatching the event, so guards are notified unconditionally.
+    //
+    // The TESHitEvent stack struct at a_event: [target NiPointer][cause NiPointer][...]
+    // We read cause and target directly and suppress if player→non-hostile.
+
+    struct ExplosionHitEventHook {
+        static void thunk(void* a_eventSource, RE::TESHitEvent* a_event)
+        {
+            if (a_event) {
+                auto* player = RE::PlayerCharacter::GetSingleton();
+                if (player) {
+                    auto* cause  = a_event->cause.get();
+                    auto* target = a_event->target.get();
+                    auto* causeActor  = cause  ? skyrim_cast<RE::Actor*>(cause)  : nullptr;
+                    auto* targetActor = target ? skyrim_cast<RE::Actor*>(target) : nullptr;
+                    if (causeActor == static_cast<RE::Actor*>(player) &&
+                        targetActor && !targetActor->IsHostileToActor(player)) {
+                        logger::trace("NOFF: explosion hit-event suppressed for '{}'",
+                            targetActor->GetName());
+                        // Only notify "resisted" when formula blocks (ally/summon).
+                        // Neutral NPC hits are allowed through — suppress silently.
+                        if (targetActor->IsCommandedActor() ||
+                            IsAllyToPlayer(targetActor, player)) {
+                            NotifyResisted(targetActor->GetName(),
+                                RE::TESForm::LookupByID(a_event->source));
+                        }
+                        // Keep flag set so ExplosionActorHitHook (fired later in
+                        // the same loop iteration) also suppresses.
+                        g_suppressNextHitEvent = true;
+                        return;
+                    }
+                    logger::trace("NOFF: explosion hit-event passthrough for '{}'",
+                        targetActor ? targetActor->GetName() : "?");
+                }
+            }
+            return func(a_eventSource, a_event);
+        }
+
+        static inline REL::Relocation<decltype(thunk)> func;
+
+        static void Install()
+        {
+            if (!REL::Module::IsAE()) {
+                logger::warn("NOFF: ExplosionHitEventHook requires AE — skipped");
+                return;
+            }
+
+            // Call site verified in Ghidra for AE 1.6.1170 at 0x1407D15BD.
+            REL::Relocation<std::uintptr_t> target{ REL::Offset(0x7D15BD) };
+            func = SKSE::GetTrampoline().write_call<5>(target.address(),
+                reinterpret_cast<std::uintptr_t>(thunk));
+
+            logger::info("NOFF: explosion hit-event hook installed at offset {:08X}", 0x7D15BDu);
+        }
+    };
+
+    // ── Hook 6a: Hit-event broadcast (Projectile_OnActorHit path) ────────────
+    //
+    // BSTEventSource<TESHitEvent>::SendEvent call site inside Projectile_OnActorHit
+    // (offset 0x7EC772, AE 1.6.1170). Fires for Lightning Storm bolts and similar
+    // projectile direct hits — independently of Projectile_HandleImpact.
+    // This function has a guard (func_0x000140400780) but it passes for neutral NPCs
+    // hit by player spells, so we must also suppress here.
+
+    struct ProjectileOnActorHitEventHook {
+        static void thunk(void* a_eventSource, RE::TESHitEvent* a_event)
+        {
+            if (a_event) {
+                auto* player = RE::PlayerCharacter::GetSingleton();
+                if (player) {
+                    auto* cause  = a_event->cause.get();
+                    auto* target = a_event->target.get();
+                    auto* causeActor  = cause  ? skyrim_cast<RE::Actor*>(cause)  : nullptr;
+                    auto* targetActor = target ? skyrim_cast<RE::Actor*>(target) : nullptr;
+                    if (causeActor == static_cast<RE::Actor*>(player) &&
+                        targetActor && !targetActor->IsHostileToActor(player)) {
+                        logger::trace("NOFF: OnActorHit hit-event suppressed for '{}'",
+                            targetActor->GetName());
+                        if (targetActor->IsCommandedActor() ||
+                            IsAllyToPlayer(targetActor, player)) {
+                            NotifyResisted(targetActor->GetName(),
+                                RE::TESForm::LookupByID(a_event->source));
+                        }
+                        return;
+                    }
+                    logger::trace("NOFF: OnActorHit hit-event passthrough for '{}'",
+                        targetActor ? targetActor->GetName() : "?");
+                }
+            }
+            return func(a_eventSource, a_event);
+        }
+
+        static inline REL::Relocation<decltype(thunk)> func;
+
+        static void Install()
+        {
+            if (!REL::Module::IsAE()) {
+                logger::warn("NOFF: ProjectileOnActorHitEventHook requires AE — skipped");
+                return;
+            }
+
+            REL::Relocation<std::uintptr_t> target{ REL::Offset(0x7EC772) };
+            func = SKSE::GetTrampoline().write_call<5>(target.address(),
+                reinterpret_cast<std::uintptr_t>(thunk));
+
+            logger::info("NOFF: OnActorHit hit-event hook installed at offset {:08X}", 0x7EC772u);
+        }
+    };
+
+    // ── Hook 6b: Hit-event broadcast (Projectile_HandleImpact path) ──────────
+    //
+    // BSTEventSource<TESHitEvent>::SendEvent call site inside Projectile_HandleImpact
+    // (offset 0x7ED0D7, AE 1.6.1170). Fires for direct projectile hits —
+    // Fireball's initial impact actor, Lightning Storm bolt hits, etc.
+    // No hostility check in this function (unlike Projectile_OnActorHit).
+
+    struct ProjectileHitEventHook {
+        static void thunk(void* a_eventSource, RE::TESHitEvent* a_event)
+        {
+            if (a_event) {
+                auto* player = RE::PlayerCharacter::GetSingleton();
+                if (player) {
+                    auto* cause  = a_event->cause.get();
+                    auto* target = a_event->target.get();
+                    auto* causeActor  = cause  ? skyrim_cast<RE::Actor*>(cause)  : nullptr;
+                    auto* targetActor = target ? skyrim_cast<RE::Actor*>(target) : nullptr;
+                    if (causeActor == static_cast<RE::Actor*>(player) &&
+                        targetActor && !targetActor->IsHostileToActor(player)) {
+                        logger::trace("NOFF: projectile hit-event suppressed for '{}'",
+                            targetActor->GetName());
+                        if (targetActor->IsCommandedActor() ||
+                            IsAllyToPlayer(targetActor, player)) {
+                            NotifyResisted(targetActor->GetName(),
+                                RE::TESForm::LookupByID(a_event->source));
+                        }
+                        return;
+                    }
+                    logger::trace("NOFF: projectile hit-event passthrough for '{}'",
+                        targetActor ? targetActor->GetName() : "?");
+                }
+            }
+            return func(a_eventSource, a_event);
+        }
+
+        static inline REL::Relocation<decltype(thunk)> func;
+
+        static void Install()
+        {
+            if (!REL::Module::IsAE()) {
+                logger::warn("NOFF: ProjectileHitEventHook requires AE — skipped");
+                return;
+            }
+
+            REL::Relocation<std::uintptr_t> target{ REL::Offset(0x7ED0D7) };
+            func = SKSE::GetTrampoline().write_call<5>(target.address(),
+                reinterpret_cast<std::uintptr_t>(thunk));
+
+            logger::info("NOFF: projectile hit-event hook installed at offset {:08X}", 0x7ED0D7u);
+        }
+    };
+
+    // ── Hook 7: Hit-task dispatch ────────────────────────────────────────────
     //
     // Actor_QueueHitTask call site inside Actor::AddTarget (offset 0x6C5413,
     // AE 1.6.1170). Queues the fUnk_Attacked task (0x62) that notifies
@@ -287,7 +678,19 @@ namespace {
             logger::trace("NOFF: hit-task enter target='{}' suppress={}",
                 a_target ? a_target->GetName() : "?", g_suppressNextHitEvent);
             if (g_suppressNextHitEvent) {
-                logger::trace("NOFF: hit-task suppressed");
+                logger::trace("NOFF: hit-task suppressed (flag)");
+                return;
+            }
+            // Also suppress when player casts on a non-hostile target — covers
+            // paths that bypass AddTarget (e.g. Projectile_OnActorHit → MagicTarget::Func1).
+            auto* player = RE::PlayerCharacter::GetSingleton();
+            const bool casterIsPlayer = player && a_caster == static_cast<RE::TESObjectREFR*>(player);
+            const bool targetHostile   = a_target && player && a_target->IsHostileToActor(player);
+            logger::trace("NOFF: hit-task direct-check: casterIsPlayer={} targetHostile={} caster={}",
+                casterIsPlayer, targetHostile,
+                a_caster ? a_caster->GetFormType() : RE::FormType::None);
+            if (casterIsPlayer && a_target && !targetHostile) {
+                logger::trace("NOFF: hit-task suppressed (direct) for '{}'", a_target->GetName());
                 return;
             }
             logger::trace("NOFF: hit-task calling func");
@@ -350,13 +753,19 @@ SKSEPluginLoad(const SKSE::LoadInterface* a_skse)
     auto* plugin = SKSE::PluginDeclaration::GetSingleton();
     logger::info("NOFF v{} loading", plugin->GetVersion());
 
-    SKSE::AllocTrampoline(28);
+    SKSE::AllocTrampoline(98);  // 14 per write_call<5> × 7 hooks
 
     SKSE::GetMessagingInterface()->RegisterListener([](SKSE::MessagingInterface::Message* msg) {
         if (msg->type == SKSE::MessagingInterface::kDataLoaded) {
             AddTargetHook::Install();
             ValueModifierUpdateHook::Install();
+            HealthDamageNotifyHook::Install();
+            CombatUnk1Hook::Install();
             HitEventHook::Install();
+            ExplosionActorHitHook::Install();
+            ExplosionHitEventHook::Install();
+            ProjectileOnActorHitEventHook::Install();
+            ProjectileHitEventHook::Install();
             HitTaskHook::Install();
         }
     });
