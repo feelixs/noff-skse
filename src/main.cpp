@@ -163,10 +163,81 @@ namespace {
 
             logger::info("NOFF: MagicTarget::AddTarget hooked on Actor, Character, PlayerCharacter (idx {} vfunc {})",
                 kMagicTargetIdx, kAddTargetVfuncIdx);
+
         }
     };
 
-    // ── Hook 2: Hit-event broadcast ──────────────────────────────────────────
+    // ── Hook 2: ValueModifierEffect::Update ──────────────────────────────────
+    //
+    // Catches concentration/beam spells (Lightning Storm, Flames, etc.) that
+    // apply damage directly via ActiveEffect::Update, bypassing AddTarget.
+    // Hooked via write_vfunc on VTABLE_ValueModifierEffect at slot 4.
+    //
+    // For allies/summons:  return without calling func (block damage entirely).
+    // For neutral NPCs:    set g_suppressNextHitEvent, call func, reset flag —
+    //                      relies on the downstream Character::sub chain
+    //                      eventually calling our hooked BSTEventSource::SendEvent
+    //                      and Actor_QueueHitTask.
+
+    struct ValueModifierUpdateHook {
+        static void thunk(RE::ActiveEffect* a_this, float a_delta)
+        {
+            auto* player = RE::PlayerCharacter::GetSingleton();
+            if (!player) {
+                return func(a_this, a_delta);
+            }
+
+            auto* caster = a_this->caster.get().get();
+            if (caster != static_cast<RE::Actor*>(player)) {
+                return func(a_this, a_delta);
+            }
+
+            auto* targetMT = a_this->target;
+            auto* targetActor = targetMT ? skyrim_cast<RE::Actor*>(targetMT->GetTargetStatsObject()) : nullptr;
+            if (!targetActor || targetActor == static_cast<RE::Actor*>(player)) {
+                return func(a_this, a_delta);
+            }
+
+            // Skip enchantments
+            if (a_this->spell && skyrim_cast<RE::EnchantmentItem*>(a_this->spell)) {
+                return func(a_this, a_delta);
+            }
+
+            const bool H = targetActor->IsHostileToActor(player);
+            const bool S = targetActor->IsCommandedActor();
+            const bool A = IsAllyToPlayer(targetActor, player);
+
+            logger::trace("NOFF: VME::Update on '{}' H={} S={} A={} spell={}",
+                targetActor->GetName(), H, S, A,
+                a_this->spell ? a_this->spell->GetName() : "?");
+
+            if (!H && (S || A)) {
+                logger::trace("NOFF: VME::Update blocked on ally/summon");
+                return;
+            }
+
+            if (!H && HasHostileEffect(a_this->spell)) {
+                logger::trace("NOFF: VME::Update suppressing for '{}'", targetActor->GetName());
+                g_suppressNextHitEvent = true;
+                func(a_this, a_delta);
+                g_suppressNextHitEvent = false;
+                return;
+            }
+
+            return func(a_this, a_delta);
+        }
+
+        static inline REL::Relocation<decltype(thunk)> func;
+
+        static void Install()
+        {
+            REL::Relocation<std::uintptr_t> vtbl{ RE::VTABLE_ValueModifierEffect[0] };
+            func = vtbl.write_vfunc(4, thunk);
+            logger::info("NOFF: ValueModifierEffect::Update hooked (slot 4)");
+        }
+    };
+
+    // ── Hook 3: Hit-event broadcast ──────────────────────────────────────────
     //
     // BSTEventSource<TESHitEvent>::SendEvent call site inside Actor::AddTarget
     // (offset 0x6C533B, AE 1.6.1170). Broadcasts to all registered hit-event
@@ -284,6 +355,7 @@ SKSEPluginLoad(const SKSE::LoadInterface* a_skse)
     SKSE::GetMessagingInterface()->RegisterListener([](SKSE::MessagingInterface::Message* msg) {
         if (msg->type == SKSE::MessagingInterface::kDataLoaded) {
             AddTargetHook::Install();
+            ValueModifierUpdateHook::Install();
             HitEventHook::Install();
             HitTaskHook::Install();
         }
