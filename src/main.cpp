@@ -1,7 +1,5 @@
 #include "pch.h"
 
-#include <unordered_set>
-
 namespace logger = SKSE::log;
 
 // ---------------------------------------------------------------------------
@@ -15,18 +13,26 @@ namespace logger = SKSE::log;
 //   ALLOW hit when: (!P || H || !S) && (!P || H || !A)
 //   BLOCK hit when: P && !H && (S || A)
 //
-// Hook 1: MagicTarget::AddTarget — returns false to drop hits on friendlies.
-// Hook 2: Actor::SendAssaultAlarm — suppresses NPC hostility reaction when
-//         a player spell hits a neutral (non-hostile) NPC.  Melee and
-//         NPC-cast spells are unaffected.
+// Hook: MagicTarget::AddTarget — returns false to drop hits on friendlies.
 // ---------------------------------------------------------------------------
 
 namespace {
 
-    // Actors recently hit by a player spell that has the Hostile flag.
-    // Populated in AddTargetHook, consumed in SendAssaultAlarmHook.
-    // Safe without synchronisation — game logic is single-threaded.
-    static inline std::unordered_set<RE::FormID> g_playerSpellTargets;
+    static inline bool g_suppressNextHitEvent = false;
+
+    // Returns true if any effect on the magic item has the Hostile flag.
+    bool HasHostileEffect(RE::MagicItem* a_item)
+    {
+        if (!a_item) {
+            return false;
+        }
+        for (auto* eff : a_item->effects) {
+            if (eff && eff->baseEffect && eff->baseEffect->IsHostile()) {
+                return true;
+            }
+        }
+        return false;
+    }
 
     // Checks if any of the target's factions have an Ally reaction
     // toward any faction the player belongs to.
@@ -58,21 +64,7 @@ namespace {
         return false;
     }
 
-    // Returns true if any effect on the magic item has the Hostile flag.
-    bool HasHostileEffect(RE::MagicItem* a_item)
-    {
-        if (!a_item) {
-            return false;
-        }
-        for (auto* eff : a_item->effects) {
-            if (eff && eff->baseEffect && eff->baseEffect->IsHostile()) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    // ── Hook 1: MagicTarget::AddTarget ──────────────────────────────────────
+    // ── Hook: MagicTarget::AddTarget ────────────────────────────────────────
 
     // Actor inherits: TESObjectREFR(4 vtables), MagicTarget, ActorValueOwner,
     // ActorState, 2x BSTEventSink, IPostAnimationChannelUpdateFunctor = 10 total.
@@ -101,8 +93,15 @@ namespace {
 
             // P: cast by player — caster is a TESObjectREFR*
             if (a_data.caster != static_cast<RE::TESObjectREFR*>(player)) {
+                logger::trace("NOFF: non-player caster on '{}' casterType={} spell={}",
+                    targetActor->GetName(),
+                    a_data.caster ? a_data.caster->GetFormType() : RE::FormType::None,
+                    a_data.magicItem ? a_data.magicItem->GetName() : "?");
                 return func(a_this, a_data);
             }
+            logger::trace("NOFF: player caster on '{}' spell={}",
+                targetActor->GetName(),
+                a_data.magicItem ? a_data.magicItem->GetName() : "?");
 
             // Weapon enchantments go through here too — skip them
             if (skyrim_cast<RE::EnchantmentItem*>(a_data.magicItem)) {
@@ -124,16 +123,18 @@ namespace {
 
             // Block when: !H && (S || A)
             if (!H && (S || A)) {
-                logger::trace("NOFF: blocked");
+                logger::trace("NOFF: blocked on ally/summon");
                 return false;  // drop the hit — effect never applied
             }
 
-            // Hit is allowed.  If non-hostile and spell has Hostile effects,
-            // mark the target so SendAssaultAlarm can suppress the reaction.
+            // Neutral NPC hit by hostile spell: let effect apply but suppress
+            // the hit-task that would make the NPC turn hostile.
             if (!H && HasHostileEffect(a_data.magicItem)) {
-                g_playerSpellTargets.insert(targetActor->GetFormID());
-                logger::trace("NOFF: marked '{}' for assault-alarm suppression",
-                    targetActor->GetName());
+                logger::trace("NOFF: suppressing hit-task for '{}'", targetActor->GetName());
+                g_suppressNextHitEvent = true;
+                bool result = func(a_this, a_data);
+                g_suppressNextHitEvent = false;
+                return result;
             }
 
             return func(a_this, a_data);
@@ -155,42 +156,94 @@ namespace {
             REL::Relocation<std::uintptr_t> vtblPlayerCharacter{ RE::VTABLE_PlayerCharacter[kMagicTargetIdx] };
             vtblPlayerCharacter.write_vfunc(kAddTargetVfuncIdx, thunk);
 
+            auto base = REL::Module::get().base();
+            logger::debug("NOFF: image base            = {:016X}", base);
+            logger::debug("NOFF: Actor::AddTarget      = {:016X} (offset {:08X})",
+                func.address(), func.address() - base);
+
             logger::info("NOFF: MagicTarget::AddTarget hooked on Actor, Character, PlayerCharacter (idx {} vfunc {})",
                 kMagicTargetIdx, kAddTargetVfuncIdx);
         }
     };
 
-    // ── Hook 2: Actor::SendAssaultAlarm ─────────────────────────────────────
+    // ── Hook 2: Hit-event broadcast ──────────────────────────────────────────
     //
-    // Non-virtual function.  Ghidra signature (AE 1.6.1170):
-    //   void Actor::SendAssaultAlarm(TESObjectREFR* a_param, bool a_flag)
-    //   RCX = this (victim), RDX = a_param, R8B = a_flag
-    //
-    // Hooked via 5-byte branch trampoline.
-    // SE ID 36429  /  AE ID 37424
+    // BSTEventSource<TESHitEvent>::SendEvent call site inside Actor::AddTarget
+    // (offset 0x6C533B, AE 1.6.1170). Broadcasts to all registered hit-event
+    // listeners including the crime/witness system. Suppressing this prevents
+    // guards from being alerted by AOE spells (Fire Storm, Lightning Storm).
+    // Skipped when g_suppressNextHitEvent is set by AddTargetHook.
 
-    struct SendAssaultAlarmHook {
-        static void thunk(RE::Actor* a_this, RE::TESObjectREFR* a_param, bool a_flag)
+    struct HitEventHook {
+        static void thunk(void* a_eventSource, void* a_event)
         {
-            auto it = g_playerSpellTargets.find(a_this->GetFormID());
-            if (it != g_playerSpellTargets.end()) {
-                g_playerSpellTargets.erase(it);
-                logger::trace("NOFF: suppressed assault alarm on '{}'",
-                    a_this->GetName());
+            if (g_suppressNextHitEvent) {
+                logger::trace("NOFF: hit-event suppressed");
                 return;
             }
-
-            return func(a_this, a_param, a_flag);
+            return func(a_eventSource, a_event);
         }
 
         static inline REL::Relocation<decltype(thunk)> func;
 
         static void Install()
         {
-            REL::Relocation<std::uintptr_t> target{ RELOCATION_ID(36429, 37424) };
-            func = target.write_branch<5>(thunk);
+            if (!REL::Module::IsAE()) {
+                logger::warn("NOFF: HitEventHook requires AE — skipped");
+                return;
+            }
 
-            logger::info("NOFF: Actor::SendAssaultAlarm hooked (RELOCATION_ID 36429/37424)");
+            // Call site verified in Ghidra for AE 1.6.1170 at 0x1406C533B.
+            REL::Relocation<std::uintptr_t> target{ REL::Offset(0x6C533B) };
+            func = SKSE::GetTrampoline().write_call<5>(target.address(),
+                reinterpret_cast<std::uintptr_t>(thunk));
+
+            logger::info("NOFF: hit-event hook installed at offset {:08X}", 0x6C533Bu);
+        }
+    };
+
+    // ── Hook 3: Hit-task dispatch ────────────────────────────────────────────
+    //
+    // Actor_QueueHitTask call site inside Actor::AddTarget (offset 0x6C5413,
+    // AE 1.6.1170). Queues the fUnk_Attacked task (0x62) that notifies
+    // combat AI and causes the NPC to personally turn hostile.
+    // Skipped when g_suppressNextHitEvent is set by AddTargetHook.
+
+    struct HitTaskHook {
+        static void thunk(void* a_taskPool, RE::Actor* a_target, RE::TESObjectREFR* a_caster,
+                          void* a_spell, std::uint32_t a_param5)
+        {
+            logger::trace("NOFF: hit-task enter target='{}' suppress={}",
+                a_target ? a_target->GetName() : "?", g_suppressNextHitEvent);
+            if (g_suppressNextHitEvent) {
+                logger::trace("NOFF: hit-task suppressed");
+                return;
+            }
+            logger::trace("NOFF: hit-task calling func");
+            func(a_taskPool, a_target, a_caster, a_spell, a_param5);
+            logger::trace("NOFF: hit-task func returned");
+        }
+
+        static inline REL::Relocation<decltype(thunk)> func;
+
+        static void Install()
+        {
+            if (!REL::Module::IsAE()) {
+                logger::warn("NOFF: HitTaskHook requires AE — skipped");
+                return;
+            }
+
+            // Call site of Actor_QueueHitTask inside Actor::AddTarget,
+            // verified in Ghidra for AE 1.6.1170 (E8 68 19 F9 FF at 0x1406C5413).
+            // Must use write_call (E8) not write_branch (E9) — original is a CALL,
+            // and JMP would misalign the stack by 8, crashing on movaps in the thunk.
+            REL::Relocation<std::uintptr_t> target{ REL::Offset(0x6C5413) };
+            func = SKSE::GetTrampoline().write_call<5>(target.address(),
+                reinterpret_cast<std::uintptr_t>(thunk));
+
+            auto base = REL::Module::get().base();
+            logger::info("NOFF: hit-task hook installed at {:016X} (offset {:08X})",
+                target.address(), target.address() - base);
         }
     };
 
@@ -213,7 +266,7 @@ void InitLogger()
     auto log  = std::make_shared<spdlog::logger>("global", std::move(sink));
 
     log->set_level(spdlog::level::trace);
-    log->flush_on(spdlog::level::trace);
+    log->flush_on(spdlog::level::info);
 
     spdlog::set_default_logger(std::move(log));
 }
@@ -226,12 +279,13 @@ SKSEPluginLoad(const SKSE::LoadInterface* a_skse)
     auto* plugin = SKSE::PluginDeclaration::GetSingleton();
     logger::info("NOFF v{} loading", plugin->GetVersion());
 
-    SKSE::AllocTrampoline(14);
+    SKSE::AllocTrampoline(28);
 
     SKSE::GetMessagingInterface()->RegisterListener([](SKSE::MessagingInterface::Message* msg) {
         if (msg->type == SKSE::MessagingInterface::kDataLoaded) {
             AddTargetHook::Install();
-            SendAssaultAlarmHook::Install();
+            HitEventHook::Install();
+            HitTaskHook::Install();
         }
     });
 
