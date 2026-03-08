@@ -10,8 +10,8 @@ namespace logger = SKSE::log;
 //   S = target is a commanded actor (summon / raise / dominate)
 //   A = target has Ally faction relation to player (GROUP_COMBAT_REACTION == 2)
 //
-//   ALLOW hit when: (!P || H || !S) && (!P || H || !A)
-//   BLOCK hit when: P && !H && (S || A)
+//   ALLOW hit when: (!P || H || !S) && (!P || H || !A) || !hostile
+//   BLOCK hit when: P && !H && (S || A) && hostile
 //
 // Hook: MagicTarget::AddTarget — returns false to drop hits on friendlies.
 // ---------------------------------------------------------------------------
@@ -121,8 +121,8 @@ namespace {
                 targetActor->GetName(), H, S, A,
                 a_data.magicItem ? a_data.magicItem->GetName() : "?");
 
-            // Block when: !H && (S || A)
-            if (!H && (S || A)) {
+            // Block when: !H && (S || A) && hostile spell
+            if (!H && (S || A) && HasHostileEffect(a_data.magicItem)) {
                 logger::trace("NOFF: blocked on ally/summon");
                 return false;  // drop the hit — effect never applied
             }
@@ -211,7 +211,7 @@ namespace {
                 targetActor->GetName(), H, S, A,
                 a_this->spell ? a_this->spell->GetName() : "?");
 
-            if (!H && (S || A)) {
+            if (!H && (S || A) && HasHostileEffect(a_this->spell)) {
                 logger::trace("NOFF: VME::Update blocked on ally/summon");
                 return;
             }
