@@ -9,13 +9,21 @@ if not exist "build\noff.dll" (
     exit /b 1
 )
 
+for /f "tokens=2" %%V in ('findstr /c:"    VERSION " CMakeLists.txt') do (
+    set "VERSION=%%V"
+    goto :found_version
+)
+:found_version
+
+set "ZIPNAME=NOFF-v%VERSION%.zip"
+
 mkdir "%PLUGINS%" 2>nul
 copy /y "build\noff.dll" "%PLUGINS%\noff.dll"
 copy /y "noff.json" "%PLUGINS%\noff.json"
 
-del /q "noff.zip" 2>nul
-"C:\Program Files\7-Zip\7z.exe" a "noff.zip" "Data"
+del /q "%ZIPNAME%" 2>nul
+"C:\Program Files\7-Zip\7z.exe" a "%ZIPNAME%" "Data"
 
 echo.
-echo Done: noff.zip
+echo Done: %ZIPNAME%
 pause

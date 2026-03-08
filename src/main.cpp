@@ -522,12 +522,11 @@ namespace {
                         targetActor && !targetActor->IsHostileToActor(player)) {
                         logger::trace("NOFF: explosion hit-event suppressed for '{}'",
                             targetActor->GetName());
-                        // Only notify "resisted" when formula blocks (ally/summon).
-                        // Neutral NPC hits are allowed through — suppress silently.
                         if (targetActor->IsCommandedActor() ||
                             IsAllyToPlayer(targetActor, player)) {
-                            NotifyResisted(targetActor->GetName(),
-                                RE::TESForm::LookupByID(a_event->source));
+                            auto* sourceForm = RE::TESForm::LookupByID(a_event->source);
+                            if (IsParentSpellHostile(skyrim_cast<RE::MagicItem*>(sourceForm)))
+                                NotifyResisted(targetActor->GetName(), sourceForm);
                         }
                         // Keep flag set so ExplosionActorHitHook (fired later in
                         // the same loop iteration) also suppresses.
@@ -583,8 +582,9 @@ namespace {
                             targetActor->GetName());
                         if (targetActor->IsCommandedActor() ||
                             IsAllyToPlayer(targetActor, player)) {
-                            NotifyResisted(targetActor->GetName(),
-                                RE::TESForm::LookupByID(a_event->source));
+                            auto* sourceForm = RE::TESForm::LookupByID(a_event->source);
+                            if (IsParentSpellHostile(skyrim_cast<RE::MagicItem*>(sourceForm)))
+                                NotifyResisted(targetActor->GetName(), sourceForm);
                         }
                         return;
                     }
@@ -635,8 +635,9 @@ namespace {
                             targetActor->GetName());
                         if (targetActor->IsCommandedActor() ||
                             IsAllyToPlayer(targetActor, player)) {
-                            NotifyResisted(targetActor->GetName(),
-                                RE::TESForm::LookupByID(a_event->source));
+                            auto* sourceForm = RE::TESForm::LookupByID(a_event->source);
+                            if (IsParentSpellHostile(skyrim_cast<RE::MagicItem*>(sourceForm)))
+                                NotifyResisted(targetActor->GetName(), sourceForm);
                         }
                         return;
                     }
@@ -739,7 +740,7 @@ void InitLogger()
     auto sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>(path->string(), true);
     auto log  = std::make_shared<spdlog::logger>("global", std::move(sink));
 
-    log->set_level(spdlog::level::trace);
+    log->set_level(spdlog::level::info);
     log->flush_on(spdlog::level::info);
 
     spdlog::set_default_logger(std::move(log));
