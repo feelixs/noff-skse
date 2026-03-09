@@ -188,11 +188,6 @@ namespace {
                 targetActor->GetName(),
                 a_data.magicItem ? a_data.magicItem->GetName() : "?");
 
-            // Weapon enchantments go through here too — skip them
-            if (skyrim_cast<RE::EnchantmentItem*>(a_data.magicItem)) {
-                return func(a_this, a_data);
-            }
-
             // H: target is currently hostile toward the player
             const bool H = targetActor->IsHostileToActor(player);
 
