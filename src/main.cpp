@@ -520,18 +520,10 @@ namespace {
                     auto* targetActor = target ? skyrim_cast<RE::Actor*>(target) : nullptr;
                     if (causeActor == static_cast<RE::Actor*>(player) &&
                         targetActor && !targetActor->IsHostileToActor(player)) {
-                        logger::trace("NOFF: explosion hit-event suppressed for '{}'",
-                            targetActor->GetName());
-                        if (targetActor->IsCommandedActor() ||
-                            IsAllyToPlayer(targetActor, player)) {
-                            auto* sourceForm = RE::TESForm::LookupByID(a_event->source);
-                            if (IsParentSpellHostile(skyrim_cast<RE::MagicItem*>(sourceForm)))
-                                NotifyResisted(targetActor->GetName(), sourceForm);
-                        }
-                        // Keep flag set so ExplosionActorHitHook (fired later in
+                        // Set flag so ExplosionActorHitHook (fired later in
                         // the same loop iteration) also suppresses.
                         g_suppressNextHitEvent = true;
-                        return;
+                        return func(a_eventSource, a_event);
                     }
                     logger::trace("NOFF: explosion hit-event passthrough for '{}'",
                         targetActor ? targetActor->GetName() : "?");
@@ -555,113 +547,6 @@ namespace {
                 reinterpret_cast<std::uintptr_t>(thunk));
 
             logger::info("NOFF: explosion hit-event hook installed at offset {:08X}", 0x7D15BDu);
-        }
-    };
-
-    // ── Hook 6a: Hit-event broadcast (Projectile_OnActorHit path) ────────────
-    //
-    // BSTEventSource<TESHitEvent>::SendEvent call site inside Projectile_OnActorHit
-    // (offset 0x7EC772, AE 1.6.1170). Fires for Lightning Storm bolts and similar
-    // projectile direct hits — independently of Projectile_HandleImpact.
-    // This function has a guard (func_0x000140400780) but it passes for neutral NPCs
-    // hit by player spells, so we must also suppress here.
-
-    struct ProjectileOnActorHitEventHook {
-        static void thunk(void* a_eventSource, RE::TESHitEvent* a_event)
-        {
-            if (a_event) {
-                auto* player = RE::PlayerCharacter::GetSingleton();
-                if (player) {
-                    auto* cause  = a_event->cause.get();
-                    auto* target = a_event->target.get();
-                    auto* causeActor  = cause  ? skyrim_cast<RE::Actor*>(cause)  : nullptr;
-                    auto* targetActor = target ? skyrim_cast<RE::Actor*>(target) : nullptr;
-                    if (causeActor == static_cast<RE::Actor*>(player) &&
-                        targetActor && !targetActor->IsHostileToActor(player)) {
-                        logger::trace("NOFF: OnActorHit hit-event suppressed for '{}'",
-                            targetActor->GetName());
-                        if (targetActor->IsCommandedActor() ||
-                            IsAllyToPlayer(targetActor, player)) {
-                            auto* sourceForm = RE::TESForm::LookupByID(a_event->source);
-                            if (IsParentSpellHostile(skyrim_cast<RE::MagicItem*>(sourceForm)))
-                                NotifyResisted(targetActor->GetName(), sourceForm);
-                        }
-                        return;
-                    }
-                    logger::trace("NOFF: OnActorHit hit-event passthrough for '{}'",
-                        targetActor ? targetActor->GetName() : "?");
-                }
-            }
-            return func(a_eventSource, a_event);
-        }
-
-        static inline REL::Relocation<decltype(thunk)> func;
-
-        static void Install()
-        {
-            if (!REL::Module::IsAE()) {
-                logger::warn("NOFF: ProjectileOnActorHitEventHook requires AE — skipped");
-                return;
-            }
-
-            REL::Relocation<std::uintptr_t> target{ REL::Offset(0x7EC772) };
-            func = SKSE::GetTrampoline().write_call<5>(target.address(),
-                reinterpret_cast<std::uintptr_t>(thunk));
-
-            logger::info("NOFF: OnActorHit hit-event hook installed at offset {:08X}", 0x7EC772u);
-        }
-    };
-
-    // ── Hook 6b: Hit-event broadcast (Projectile_HandleImpact path) ──────────
-    //
-    // BSTEventSource<TESHitEvent>::SendEvent call site inside Projectile_HandleImpact
-    // (offset 0x7ED0D7, AE 1.6.1170). Fires for direct projectile hits —
-    // Fireball's initial impact actor, Lightning Storm bolt hits, etc.
-    // No hostility check in this function (unlike Projectile_OnActorHit).
-
-    struct ProjectileHitEventHook {
-        static void thunk(void* a_eventSource, RE::TESHitEvent* a_event)
-        {
-            if (a_event) {
-                auto* player = RE::PlayerCharacter::GetSingleton();
-                if (player) {
-                    auto* cause  = a_event->cause.get();
-                    auto* target = a_event->target.get();
-                    auto* causeActor  = cause  ? skyrim_cast<RE::Actor*>(cause)  : nullptr;
-                    auto* targetActor = target ? skyrim_cast<RE::Actor*>(target) : nullptr;
-                    if (causeActor == static_cast<RE::Actor*>(player) &&
-                        targetActor && !targetActor->IsHostileToActor(player)) {
-                        logger::trace("NOFF: projectile hit-event suppressed for '{}'",
-                            targetActor->GetName());
-                        if (targetActor->IsCommandedActor() ||
-                            IsAllyToPlayer(targetActor, player)) {
-                            auto* sourceForm = RE::TESForm::LookupByID(a_event->source);
-                            if (IsParentSpellHostile(skyrim_cast<RE::MagicItem*>(sourceForm)))
-                                NotifyResisted(targetActor->GetName(), sourceForm);
-                        }
-                        return;
-                    }
-                    logger::trace("NOFF: projectile hit-event passthrough for '{}'",
-                        targetActor ? targetActor->GetName() : "?");
-                }
-            }
-            return func(a_eventSource, a_event);
-        }
-
-        static inline REL::Relocation<decltype(thunk)> func;
-
-        static void Install()
-        {
-            if (!REL::Module::IsAE()) {
-                logger::warn("NOFF: ProjectileHitEventHook requires AE — skipped");
-                return;
-            }
-
-            REL::Relocation<std::uintptr_t> target{ REL::Offset(0x7ED0D7) };
-            func = SKSE::GetTrampoline().write_call<5>(target.address(),
-                reinterpret_cast<std::uintptr_t>(thunk));
-
-            logger::info("NOFF: projectile hit-event hook installed at offset {:08X}", 0x7ED0D7u);
         }
     };
 
@@ -754,7 +639,7 @@ SKSEPluginLoad(const SKSE::LoadInterface* a_skse)
     auto* plugin = SKSE::PluginDeclaration::GetSingleton();
     logger::info("NOFF v{} loading", plugin->GetVersion());
 
-    SKSE::AllocTrampoline(98);  // 14 per write_call<5> × 7 hooks
+    SKSE::AllocTrampoline(70);  // 14 per write_call<5> × 5 hooks
 
     SKSE::GetMessagingInterface()->RegisterListener([](SKSE::MessagingInterface::Message* msg) {
         if (msg->type == SKSE::MessagingInterface::kDataLoaded) {
@@ -765,8 +650,6 @@ SKSEPluginLoad(const SKSE::LoadInterface* a_skse)
             HitEventHook::Install();
             ExplosionActorHitHook::Install();
             ExplosionHitEventHook::Install();
-            ProjectileOnActorHitEventHook::Install();
-            ProjectileHitEventHook::Install();
             HitTaskHook::Install();
         }
     });

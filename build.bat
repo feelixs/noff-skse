@@ -13,6 +13,9 @@ set "VCPKG_PKGS=C:\Users\mmh\vcpkg\packages"
 set "CMAKE_PREFIX_PATH=%VCPKG_PKGS%\spdlog_x64-windows-static-md;%VCPKG_PKGS%\fmt_x64-windows-static-md;%VCPKG_PKGS%\rapidcsv_x64-windows-static-md"
 set "CMAKE_INCLUDE_PATH=%VCPKG_PKGS%\rapidcsv_x64-windows-static-md\include"
 
+set "BUILD_START=%TIME%"
+echo Started: %DATE% %BUILD_START%
+
 rd /s /q build 2>nul
 cmake -B build -S . -G Ninja ^
     -DCMAKE_BUILD_TYPE=Release ^
@@ -35,6 +38,14 @@ if errorlevel 1 (
     exit /b 1
 )
 
+for /f "tokens=1-3 delims=:.," %%a in ("%BUILD_START%") do set /a BUILD_START_S=%%a*3600+%%b*60+%%c
+for /f "tokens=1-3 delims=:.," %%a in ("%TIME%") do set /a BUILD_END_S=%%a*3600+%%b*60+%%c
+set /a BUILD_ELAPSED=BUILD_END_S-BUILD_START_S
+set /a BUILD_M=BUILD_ELAPSED/60
+set /a BUILD_S=BUILD_ELAPSED%%60
+
 echo.
 echo Build succeeded!
+echo Finished: %DATE% %TIME%
+echo Time taken: %BUILD_M%m %BUILD_S%s
 call "%~dp0zipup.bat"
