@@ -1,5 +1,6 @@
 .idea/
 .claude/
+dev/
 build/
 Data/
 *.pyc
