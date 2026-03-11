@@ -342,8 +342,7 @@ namespace {
             auto* player = RE::PlayerCharacter::GetSingleton();
             if (player && a_caster == static_cast<RE::TESObjectREFR*>(player) &&
                 !a_target->IsHostileToActor(player)) {
-                logger::trace("NOFF: health-damage notify: setting flag for '{}'",
-                    a_target->GetName());
+                logger::trace("NOFF: health-damage notify: setting flag for '{}'", a_target->GetName());
                 g_suppressNextHitEvent = true;
                 func(a_target, a_caster, a_damage);
                 g_suppressNextHitEvent = false;
@@ -386,12 +385,10 @@ namespace {
         static void thunk(RE::Actor* a_actor, std::uint32_t a_param2)
         {
             if (g_suppressNextHitEvent) {
-                logger::trace("NOFF: Combat_unk1 suppressed for '{}'",
-                    a_actor ? a_actor->GetName() : "?");
+                logger::trace("NOFF: Combat_unk1 suppressed for '{}'", a_actor ? a_actor->GetName() : "?");
                 return;
             }
-            logger::trace("NOFF: Combat_unk1 passthrough for '{}' param2={}",
-                a_actor ? a_actor->GetName() : "?", a_param2);
+            logger::trace("NOFF: Combat_unk1 passthrough for '{}' param2={}", a_actor ? a_actor->GetName() : "?", a_param2);
             return func(a_actor, a_param2);
         }
 
@@ -399,18 +396,19 @@ namespace {
 
         static void Install()
         {
-            if (!REL::Module::IsAE()) {
-                logger::warn("NOFF: CombatUnk1Hook requires AE — skipped");
-                return;
+            // CALL to Actor::Combat_unk1 inside the health-damage notify function.
+            // AE: ID 38631 (RVA 0x6BC4A0), call site +0x180.
+            // SE 1.5.97: Character::sub (RVA 0x62A530), call site +0x16D = RVA 0x62A69D.
+            //   Note: SE Combat_unk1 takes 4 params; suppress path is unaffected,
+            //   passthrough relies on R8/R9 being preserved (valid if no trace logging).
+            std::uintptr_t addr;
+            if (REL::Module::IsAE()) {
+                addr = REL::Relocation<std::uintptr_t>{ REL::ID(38631), 0x180 }.address();
+            } else {
+                addr = REL::Module::get().base() + 0x62A69D;
             }
-
-            // CALL to Actor::Combat_unk1 at line 56 inside func_0x0001406bc4a0.
-            // Verified in Ghidra for AE 1.6.1170 at 0x1406BC620.
-            REL::Relocation<std::uintptr_t> target{ REL::Offset(0x6BC620) };
-            func = SKSE::GetTrampoline().write_call<5>(target.address(),
-                reinterpret_cast<std::uintptr_t>(thunk));
-
-            logger::info("NOFF: Combat_unk1 hook installed at offset {:08X}", 0x6BC620u);
+            func = SKSE::GetTrampoline().write_call<5>(addr, reinterpret_cast<std::uintptr_t>(thunk));
+            logger::info("NOFF: Combat_unk1 hook installed at {:016X}", addr);
         }
     };
 
@@ -436,17 +434,16 @@ namespace {
 
         static void Install()
         {
+            // BSTEventSource<TESHitEvent>::SendEvent inside Actor::AddTarget (ID 38786).
+            // AE: ID 38786 (RVA 0x6C50A0), call site +0x29B.
+            // SE 1.5.97: pending Ghidra offset mapping — skipped for now.
             if (!REL::Module::IsAE()) {
-                logger::warn("NOFF: HitEventHook requires AE — skipped");
+                logger::warn("NOFF: HitEventHook skipped on SE (SE offset pending)");
                 return;
             }
-
-            // Call site verified in Ghidra for AE 1.6.1170 at 0x1406C533B.
-            REL::Relocation<std::uintptr_t> target{ REL::Offset(0x6C533B) };
-            func = SKSE::GetTrampoline().write_call<5>(target.address(),
-                reinterpret_cast<std::uintptr_t>(thunk));
-
-            logger::info("NOFF: hit-event hook installed at offset {:08X}", 0x6C533Bu);
+            REL::Relocation<std::uintptr_t> target{ REL::ID(38786), 0x29B };
+            func = SKSE::GetTrampoline().write_call<5>(target.address(), reinterpret_cast<std::uintptr_t>(thunk));
+            logger::info("NOFF: hit-event hook installed at {:016X}", target.address());
         }
     };
 
@@ -466,12 +463,10 @@ namespace {
             // within the same Explosion_ApplyEffects loop iteration.
             if (g_suppressNextHitEvent) {
                 g_suppressNextHitEvent = false;
-                logger::trace("NOFF: explosion actor-hit suppressed for '{}'",
-                    a_target ? a_target->GetName() : "?");
+                logger::trace("NOFF: explosion actor-hit suppressed for '{}'", a_target ? a_target->GetName() : "?");
                 return;
             }
-            logger::trace("NOFF: explosion actor-hit passthrough for '{}'",
-                a_target ? a_target->GetName() : "?");
+            logger::trace("NOFF: explosion actor-hit passthrough for '{}'", a_target ? a_target->GetName() : "?");
             return func(a_target, a_hitData);
         }
 
@@ -479,16 +474,16 @@ namespace {
 
         static void Install()
         {
+            // TESObjectREFR::sub inside Explosion_ApplyEffects (ID 43849).
+            // AE: ID 43849 (RVA 0x7D12D0), call site +0x412.
+            // SE 1.5.97: pending Ghidra offset mapping — skipped for now.
             if (!REL::Module::IsAE()) {
-                logger::warn("NOFF: ExplosionActorHitHook requires AE — skipped");
+                logger::warn("NOFF: ExplosionActorHitHook skipped on SE (SE offset pending)");
                 return;
             }
-
-            REL::Relocation<std::uintptr_t> target{ REL::Offset(0x7D16E2) };
-            func = SKSE::GetTrampoline().write_call<5>(target.address(),
-                reinterpret_cast<std::uintptr_t>(thunk));
-
-            logger::info("NOFF: explosion actor-hit hook installed at offset {:08X}", 0x7D16E2u);
+            REL::Relocation<std::uintptr_t> target{ REL::ID(43849), 0x412 };
+            func = SKSE::GetTrampoline().write_call<5>(target.address(), reinterpret_cast<std::uintptr_t>(thunk));
+            logger::info("NOFF: explosion actor-hit hook installed at {:016X}", target.address());
         }
     };
 
@@ -520,8 +515,7 @@ namespace {
                         g_suppressNextHitEvent = true;
                         return func(a_eventSource, a_event);
                     }
-                    logger::trace("NOFF: explosion hit-event passthrough for '{}'",
-                        targetActor ? targetActor->GetName() : "?");
+                    logger::trace("NOFF: explosion hit-event passthrough for '{}'", targetActor ? targetActor->GetName() : "?");
                 }
             }
             return func(a_eventSource, a_event);
@@ -531,17 +525,16 @@ namespace {
 
         static void Install()
         {
+            // BSTEventSource<TESHitEvent>::SendEvent inside Explosion_ApplyEffects (ID 43849).
+            // AE: ID 43849 (RVA 0x7D12D0), call site +0x2ED.
+            // SE 1.5.97: pending Ghidra offset mapping — skipped for now.
             if (!REL::Module::IsAE()) {
-                logger::warn("NOFF: ExplosionHitEventHook requires AE — skipped");
+                logger::warn("NOFF: ExplosionHitEventHook skipped on SE (SE offset pending)");
                 return;
             }
-
-            // Call site verified in Ghidra for AE 1.6.1170 at 0x1407D15BD.
-            REL::Relocation<std::uintptr_t> target{ REL::Offset(0x7D15BD) };
-            func = SKSE::GetTrampoline().write_call<5>(target.address(),
-                reinterpret_cast<std::uintptr_t>(thunk));
-
-            logger::info("NOFF: explosion hit-event hook installed at offset {:08X}", 0x7D15BDu);
+            REL::Relocation<std::uintptr_t> target{ REL::ID(43849), 0x2ED };
+            func = SKSE::GetTrampoline().write_call<5>(target.address(), reinterpret_cast<std::uintptr_t>(thunk));
+            logger::info("NOFF: explosion hit-event hook installed at {:016X}", target.address());
         }
     };
 
@@ -553,11 +546,9 @@ namespace {
     // Skipped when g_suppressNextHitEvent is set by AddTargetHook.
 
     struct HitTaskHook {
-        static void thunk(void* a_taskPool, RE::Actor* a_target, RE::TESObjectREFR* a_caster,
-                          void* a_spell, std::uint32_t a_param5)
+        static void thunk(void* a_taskPool, RE::Actor* a_target, RE::TESObjectREFR* a_caster, void* a_spell, std::uint32_t a_param5)
         {
-            logger::trace("NOFF: hit-task enter target='{}' suppress={}",
-                a_target ? a_target->GetName() : "?", g_suppressNextHitEvent);
+            logger::trace("NOFF: hit-task enter target='{}' suppress={}", a_target ? a_target->GetName() : "?", g_suppressNextHitEvent);
             if (g_suppressNextHitEvent) {
                 logger::trace("NOFF: hit-task suppressed (flag)");
                 return;
@@ -583,22 +574,20 @@ namespace {
 
         static void Install()
         {
-            if (!REL::Module::IsAE()) {
-                logger::warn("NOFF: HitTaskHook requires AE — skipped");
-                return;
-            }
-
-            // Call site of Actor_QueueHitTask inside Actor::AddTarget,
-            // verified in Ghidra for AE 1.6.1170 (E8 68 19 F9 FF at 0x1406C5413).
+            // Actor_QueueHitTask call site inside Actor::AddTarget (ID 38786).
+            // AE: ID 38786 (RVA 0x6C50A0), call site +0x373.
+            // SE 1.5.97: pending Ghidra offset mapping — skipped for now.
             // Must use write_call (E8) not write_branch (E9) — original is a CALL,
             // and JMP would misalign the stack by 8, crashing on movaps in the thunk.
-            REL::Relocation<std::uintptr_t> target{ REL::Offset(0x6C5413) };
-            func = SKSE::GetTrampoline().write_call<5>(target.address(),
-                reinterpret_cast<std::uintptr_t>(thunk));
+            if (!REL::Module::IsAE()) {
+                logger::warn("NOFF: HitTaskHook skipped on SE (SE offset pending)");
+                return;
+            }
+            REL::Relocation<std::uintptr_t> target{ REL::ID(38786), 0x373 };
+            func = SKSE::GetTrampoline().write_call<5>(target.address(), reinterpret_cast<std::uintptr_t>(thunk));
 
             auto base = REL::Module::get().base();
-            logger::info("NOFF: hit-task hook installed at {:016X} (offset {:08X})",
-                target.address(), target.address() - base);
+            logger::info("NOFF: hit-task hook installed at {:016X} (offset {:08X})", target.address(), target.address() - base);
         }
     };
 
