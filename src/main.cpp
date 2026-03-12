@@ -434,16 +434,17 @@ namespace {
 
         static void Install()
         {
-            // BSTEventSource<TESHitEvent>::SendEvent inside Actor::AddTarget (ID 38786).
+            // BSTEventSource<TESHitEvent>::SendEvent inside Actor::AddTarget.
             // AE: ID 38786 (RVA 0x6C50A0), call site +0x29B.
-            // SE 1.5.97: pending Ghidra offset mapping — skipped for now.
-            if (!REL::Module::IsAE()) {
-                logger::warn("NOFF: HitEventHook skipped on SE (SE offset pending)");
-                return;
+            // SE 1.5.97: Actor::AddTarget (RVA 0x633090), call site +0x1C3 = RVA 0x633253.
+            std::uintptr_t addr;
+            if (REL::Module::IsAE()) {
+                addr = REL::Relocation<std::uintptr_t>{ REL::ID(38786), 0x29B }.address();
+            } else {
+                addr = REL::Module::get().base() + 0x633253;
             }
-            REL::Relocation<std::uintptr_t> target{ REL::ID(38786), 0x29B };
-            func = SKSE::GetTrampoline().write_call<5>(target.address(), reinterpret_cast<std::uintptr_t>(thunk));
-            logger::info("NOFF: hit-event hook installed at {:016X}", target.address());
+            func = SKSE::GetTrampoline().write_call<5>(addr, reinterpret_cast<std::uintptr_t>(thunk));
+            logger::info("NOFF: hit-event hook installed at {:016X}", addr);
         }
     };
 
@@ -474,16 +475,17 @@ namespace {
 
         static void Install()
         {
-            // TESObjectREFR::sub inside Explosion_ApplyEffects (ID 43849).
+            // TESObjectREFR::sub inside Explosion_ApplyEffects.
             // AE: ID 43849 (RVA 0x7D12D0), call site +0x412.
-            // SE 1.5.97: pending Ghidra offset mapping — skipped for now.
-            if (!REL::Module::IsAE()) {
-                logger::warn("NOFF: ExplosionActorHitHook skipped on SE (SE offset pending)");
-                return;
+            // SE 1.5.97: Explosion::sub (RVA 0x739630), call site +0x3DC = RVA 0x739A0C.
+            std::uintptr_t addr;
+            if (REL::Module::IsAE()) {
+                addr = REL::Relocation<std::uintptr_t>{ REL::ID(43849), 0x412 }.address();
+            } else {
+                addr = REL::Module::get().base() + 0x739A0C;
             }
-            REL::Relocation<std::uintptr_t> target{ REL::ID(43849), 0x412 };
-            func = SKSE::GetTrampoline().write_call<5>(target.address(), reinterpret_cast<std::uintptr_t>(thunk));
-            logger::info("NOFF: explosion actor-hit hook installed at {:016X}", target.address());
+            func = SKSE::GetTrampoline().write_call<5>(addr, reinterpret_cast<std::uintptr_t>(thunk));
+            logger::info("NOFF: explosion actor-hit hook installed at {:016X}", addr);
         }
     };
 
@@ -525,16 +527,17 @@ namespace {
 
         static void Install()
         {
-            // BSTEventSource<TESHitEvent>::SendEvent inside Explosion_ApplyEffects (ID 43849).
+            // BSTEventSource<TESHitEvent>::SendEvent inside Explosion_ApplyEffects.
             // AE: ID 43849 (RVA 0x7D12D0), call site +0x2ED.
-            // SE 1.5.97: pending Ghidra offset mapping — skipped for now.
-            if (!REL::Module::IsAE()) {
-                logger::warn("NOFF: ExplosionHitEventHook skipped on SE (SE offset pending)");
-                return;
+            // SE 1.5.97: Explosion::sub (RVA 0x739630), call site +0x2BB = RVA 0x7398EB.
+            std::uintptr_t addr;
+            if (REL::Module::IsAE()) {
+                addr = REL::Relocation<std::uintptr_t>{ REL::ID(43849), 0x2ED }.address();
+            } else {
+                addr = REL::Module::get().base() + 0x7398EB;
             }
-            REL::Relocation<std::uintptr_t> target{ REL::ID(43849), 0x2ED };
-            func = SKSE::GetTrampoline().write_call<5>(target.address(), reinterpret_cast<std::uintptr_t>(thunk));
-            logger::info("NOFF: explosion hit-event hook installed at {:016X}", target.address());
+            func = SKSE::GetTrampoline().write_call<5>(addr, reinterpret_cast<std::uintptr_t>(thunk));
+            logger::info("NOFF: explosion hit-event hook installed at {:016X}", addr);
         }
     };
 
@@ -574,20 +577,21 @@ namespace {
 
         static void Install()
         {
-            // Actor_QueueHitTask call site inside Actor::AddTarget (ID 38786).
+            // Actor_QueueHitTask call site inside Actor::AddTarget.
             // AE: ID 38786 (RVA 0x6C50A0), call site +0x373.
-            // SE 1.5.97: pending Ghidra offset mapping — skipped for now.
+            // SE 1.5.97: Actor::AddTarget (RVA 0x633090), call site +0x27C = RVA 0x63330C.
             // Must use write_call (E8) not write_branch (E9) — original is a CALL,
             // and JMP would misalign the stack by 8, crashing on movaps in the thunk.
-            if (!REL::Module::IsAE()) {
-                logger::warn("NOFF: HitTaskHook skipped on SE (SE offset pending)");
-                return;
+            std::uintptr_t addr;
+            if (REL::Module::IsAE()) {
+                addr = REL::Relocation<std::uintptr_t>{ REL::ID(38786), 0x373 }.address();
+            } else {
+                addr = REL::Module::get().base() + 0x63330C;
             }
-            REL::Relocation<std::uintptr_t> target{ REL::ID(38786), 0x373 };
-            func = SKSE::GetTrampoline().write_call<5>(target.address(), reinterpret_cast<std::uintptr_t>(thunk));
+            func = SKSE::GetTrampoline().write_call<5>(addr, reinterpret_cast<std::uintptr_t>(thunk));
 
             auto base = REL::Module::get().base();
-            logger::info("NOFF: hit-task hook installed at {:016X} (offset {:08X})", target.address(), target.address() - base);
+            logger::info("NOFF: hit-task hook installed at {:016X} (offset {:08X})", addr, addr - base);
         }
     };
 
