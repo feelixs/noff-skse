@@ -115,4 +115,4 @@ Hooks 3b, 4, 5a, 5b, and 6 use hardcoded AE 1.6.1170 offsets and are skipped wit
 
 ---
 
-Created by feelixs (@hesmick on nexusmods) and Claude Code
+Created by feelixs (@hesmick on nexusmods)

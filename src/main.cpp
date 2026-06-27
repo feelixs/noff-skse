@@ -20,6 +20,13 @@ namespace {
 
     static inline bool g_suppressNextHitEvent = false;
 
+    // Quest pass-through (POC): while The Way of the Voice (MQ105) is running,
+    // let player shouts land on Greybeards untouched so the quest's shout-test
+    // can register. Resolved once at kDataLoaded; null if lookup fails (guard
+    // becomes inert and NOFF behaves as normal).
+    static inline RE::TESFaction* g_greybeardFaction = nullptr;  // Skyrim.esm 0x02C6C8
+    static inline RE::TESQuest*   g_wayOfVoiceQuest  = nullptr;  // Skyrim.esm 0x0242BA
+
     // Resolves the display name for any TESForm that may be a spell, shout
     // word-combo spell, or magic effect — returning the highest-level name:
     //   MGEF      → parent SpellItem  → parent TESShout (if voice-power)
@@ -187,6 +194,15 @@ namespace {
             logger::trace("NOFF: player caster on '{}' spell={}",
                 targetActor->GetName(),
                 a_data.magicItem ? a_data.magicItem->GetName() : "?");
+
+            // Quest pass-through: while MQ105 is running, let shouts land on
+            // Greybeards untouched so the shout-test can register.
+            if (g_greybeardFaction && g_wayOfVoiceQuest &&
+                targetActor->IsInFaction(g_greybeardFaction) &&
+                g_wayOfVoiceQuest->IsRunning()) {
+                logger::trace("NOFF: greybeard quest pass-through for '{}'", targetActor->GetName());
+                return func(a_this, a_data);  // vanilla — effect applies, NOFF stays out
+            }
 
             // H: target is currently hostile toward the player
             const bool H = targetActor->IsHostileToActor(player);
@@ -631,6 +647,13 @@ SKSEPluginLoad(const SKSE::LoadInterface* a_skse)
 
     SKSE::GetMessagingInterface()->RegisterListener([](SKSE::MessagingInterface::Message* msg) {
         if (msg->type == SKSE::MessagingInterface::kDataLoaded) {
+            if (auto* dh = RE::TESDataHandler::GetSingleton()) {
+                g_greybeardFaction = dh->LookupForm<RE::TESFaction>(0x02C6C8, "Skyrim.esm");
+                g_wayOfVoiceQuest  = dh->LookupForm<RE::TESQuest>(0x0242BA, "Skyrim.esm");
+            }
+            logger::info("NOFF: greybeard pass-through resolved faction={} quest={}",
+                g_greybeardFaction != nullptr, g_wayOfVoiceQuest != nullptr);
+
             AddTargetHook::Install();
             ValueModifierUpdateHook::Install();
             HealthDamageNotifyHook::Install();
